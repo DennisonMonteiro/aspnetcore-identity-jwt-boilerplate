@@ -1,6 +1,7 @@
 ﻿using Identity.Data.Context;
 using Identity.Domain.Entities;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,34 +15,68 @@ public static class DatabaseInitializer
     {
         using var scope = serviceProvider.CreateScope();
         var services = scope.ServiceProvider;
+        var logger = services.GetRequiredService<ILogger<AppDbContext>>();
+        var context = services.GetRequiredService<AppDbContext>();
 
-        try
+        const int maxRetries = 3;
+        var delay = TimeSpan.FromSeconds(3);
+        var connectionString = configuration.GetConnectionString("DefaultConnection");
+
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            var context = services.GetRequiredService<AppDbContext>();
-            var userManager = services.GetRequiredService<UserManager<User>>();
-            var logger = services.GetRequiredService<ILogger<AppDbContext>>();
-
-            logger.LogInformation("Checking for pending migrations...");
-            var pendingMigrations = await context.Database.GetPendingMigrationsAsync();
-
-            if (pendingMigrations.Any())
+            try
             {
-                logger.LogInformation("Applying migrations...");
+                logger.LogInformation($"[{attempt}/{maxRetries}] Checking database connection...");
+
+                await EnsureDatabaseExistsAsync(connectionString, logger);
+
+                logger.LogInformation("Ensuring database schema is up to date...");
                 await context.Database.MigrateAsync();
-                logger.LogInformation("Migrations applied successfully!");
-            }
-            else
-            {
-                logger.LogInformation("Database is up to date.");
-            }
 
-            await SeedAdminUserAsync(userManager, logger, configuration);
+                var userManager = services.GetRequiredService<UserManager<User>>();
+                await SeedAdminUserAsync(userManager, logger, configuration);
+
+                logger.LogInformation("Database initialization complete.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, $"Database initialization failed on attempt {attempt}. Retrying in {delay.TotalSeconds}s...");
+                if (attempt == maxRetries)
+                {
+                    logger.LogError(ex, "Could not initialize the database after multiple retries.");
+                    throw;
+                }
+
+                await Task.Delay(delay);
+            }
         }
-        catch (Exception ex)
+    }
+
+    private static async Task EnsureDatabaseExistsAsync(string connectionString, ILogger logger)
+    {
+        var builder = new SqlConnectionStringBuilder(connectionString);
+        var databaseName = builder.InitialCatalog;
+        builder.InitialCatalog = "master";
+
+        await using var connection = new SqlConnection(builder.ConnectionString);
+        await connection.OpenAsync();
+
+        var checkCommand = connection.CreateCommand();
+        checkCommand.CommandText = $"SELECT database_id FROM sys.databases WHERE Name = '{databaseName}'";
+        var result = await checkCommand.ExecuteScalarAsync();
+
+        if (result == null)
         {
-            var logger = services.GetRequiredService<ILogger<AppDbContext>>();
-            logger.LogError(ex, "An error occurred while initializing the database.");
-            throw;
+            logger.LogInformation($"Database '{databaseName}' does not exist. Creating...");
+            var createCommand = connection.CreateCommand();
+            createCommand.CommandText = $"CREATE DATABASE [{databaseName}]";
+            await createCommand.ExecuteNonQueryAsync();
+            logger.LogInformation($"Database '{databaseName}' created successfully!");
+        }
+        else
+        {
+            logger.LogInformation($"Database '{databaseName}' already exists.");
         }
     }
 
@@ -51,34 +86,23 @@ public static class DatabaseInitializer
         var adminPassword = configuration["AdminUser:Password"] ?? "Admin123!";
 
         var adminUser = await userManager.FindByEmailAsync(adminEmail);
-
         if (adminUser == null)
         {
             logger.LogInformation("Creating admin user...");
 
-            adminUser = new User
+            var newUser = new User
             {
                 UserName = adminEmail,
                 Email = adminEmail,
                 EmailConfirmed = true
             };
 
-            var result = await userManager.CreateAsync(adminUser, adminPassword);
-
+            var result = await userManager.CreateAsync(newUser, adminPassword);
             if (result.Succeeded)
-            {
                 logger.LogInformation("Admin user created successfully!");
-                logger.LogInformation($"Email: {adminEmail}");
-                logger.LogInformation($"Password: {adminPassword}");
-            }
             else
-            {
-                logger.LogError("Failed to create admin user:");
                 foreach (var error in result.Errors)
-                {
-                    logger.LogError($"- {error.Description}");
-                }
-            }
+                    logger.LogError($"{error.Description}");
         }
         else
         {

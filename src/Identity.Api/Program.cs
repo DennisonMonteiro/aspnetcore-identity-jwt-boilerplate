@@ -17,7 +17,11 @@ var configuration = builder.Configuration;
 
 services.AddDbContext<AppDbContext>(options =>
 {
-    options.UseSqlServer(configuration.GetConnectionString("DefaultConnection"));
+    options.UseSqlServer(configuration.GetConnectionString("DefaultConnection"),
+        sqlOptions =>
+        {
+            sqlOptions.EnableRetryOnFailure(5, TimeSpan.FromSeconds(2), null);
+        });
 });
 
 var jwtKey = configuration["Jwt:Key"] ?? "SuaChaveSecretaSuperSegura123!@#$%";
