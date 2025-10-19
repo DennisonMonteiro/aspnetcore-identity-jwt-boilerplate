@@ -1,0 +1,47 @@
+services:
+  identity-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: identity-api
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+      - Jwt__Key=${JWT_KEY}
+      - AdminUser__Email=${ADMIN_EMAIL}
+      - AdminUser__Password=${ADMIN_PASSWORD}
+    ports:
+      - "8080:8080"
+    depends_on:
+      sql-server:
+        condition: service_started  # Mudança aqui: não espera o healthcheck
+    networks:
+      - identity-network
+    restart: on-failure  # Reinicia se falhar
+
+  sql-server:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sql-server
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=1q2w3e4r!@#
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sql-server-mssql:/var/opt/mssql
+    networks:
+      - identity-network
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P '1q2w3e4r!@#' -Q 'SELECT 1' -C || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s  # Aumentado para dar tempo ao SQL Server inicializar
+
+volumes:
+  sql-server-mssql:
+
+networks:
+  identity-network:
+    driver: bridge
